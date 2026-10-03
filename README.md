@@ -87,9 +87,10 @@ gosync.js -n     dry run: list what would be copied
 **gosane** (button, or `gosane.sh` in Termux), to convert without a camera attached:
 
 ```
-gosane.sh            1080p, hardware encoder
+gosane.sh            1080p, libx264 (software)
 gosane.sh -4         4K
-gosane.sh -sw        1080p with libx264: better quality, much slower
+gosane.sh -hw        hardware encoder: faster, but one keyframe per clip, so
+                     Google Photos can't edit longer clips
 gosane.sh -n         dry run
 gosane.sh FILE|DIR   convert specific files or folders
 ```
@@ -119,7 +120,10 @@ Wi-Fi.
 - Writes `NAME_1080.mp4` (or `_4k`) into `DCIM/Camera`, scaled to fit
   1920×1080 (or 3840×2160) in either orientation, audio copied as-is.
 - Decodes in software (the phone's hardware decoder refuses 5.3K) and encodes
-  with the hardware `h264_mediacodec` encoder, about 1.5 s per second of footage.
+  with `libx264`, about 2.5 s per second of footage, with a keyframe every
+  30 frames so Google Photos can trim and edit it. The hardware
+  `h264_mediacodec` encoder (`-hw`) ignores the keyframe setting on this phone.
+- Drops GoPro HiLight chapter markers, which came out as a broken chapter track.
 - Checks the result is H.264 with the same duration, then moves the original to
   `DCIM/GoPro-HEVC` (with `.nomedia`, so the gallery hides it).
 - Keeps the original's capture date. A pre-2020 date (wrong camera clock) is
