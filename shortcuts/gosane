@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Widget shortcut: convert GoPro clips, keeping the phone awake meanwhile.
+termux-wake-lock
+~/.local/bin/gosane.sh
+status=$?
+termux-wake-unlock
+echo
+[ $status -eq 0 ] && echo "All done." || echo "Finished with errors (see ~/gosane.log)."
+read -rp "Press Enter to close."

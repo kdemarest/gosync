@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Widget shortcut: copy new GoPro media over USB, then convert it.
+termux-wake-lock
+~/.local/bin/gosync.js
+status=$?
+termux-wake-unlock
+echo
+[ $status -eq 0 ] && echo "All done." || echo "Finished with errors (see ~/gosync.log and ~/gosane.log)."
+read -rp "Press Enter to close."
