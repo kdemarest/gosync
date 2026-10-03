@@ -5,9 +5,10 @@
 # HEVC, writes <name>_1080.mp4 (or _4k) into DCIM/Camera, then moves the HEVC
 # original into DCIM/GoPro-HEVC (hidden from the gallery by .nomedia).
 #
-# Usage: gosane.sh [-4] [-sw] [-n] [file|dir ...]
+# Usage: gosane.sh [-4] [-hw] [-n] [file|dir ...]
 #   -4    4K output (fits in 3840x2160) instead of 1080p (fits in 1920x1080)
-#   -sw   encode with libx264 (better quality, much slower) instead of hardware
+#   -hw   encode with the hardware encoder (faster, but this phone's puts only
+#         one keyframe in the whole clip, which Google Photos can't edit)
 #   -n    dry run: list what would be converted
 #   With no file/dir arguments, scans DCIM/Camera and Movies/GoPro-Exports.
 
@@ -20,13 +21,13 @@ DEFAULT_SOURCES=("$STORAGE/DCIM/Camera" "$STORAGE/Movies/GoPro-Exports")
 LOG=$HOME/gosane.log
 SETTLE_SECS=${GOSANE_SETTLE_SECS:-60}  # skip files modified this recently (sync still writing)
 
-res=1080 enc=hw dry=0 sources=()
+res=1080 enc=sw dry=0 sources=()
 for arg in "$@"; do
     case $arg in
         -4)  res=4k ;;
-        -sw) enc=sw ;;
+        -hw) enc=hw ;;
         -n)  dry=1 ;;
-        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)  echo "unknown option: $arg" >&2; exit 2 ;;
         *)   sources+=("$arg") ;;
     esac
@@ -41,10 +42,10 @@ scale="scale=w='if(gte(iw,ih),$long,$short)':h='if(gte(iw,ih),$short,$long)'"
 scale+=":force_original_aspect_ratio=decrease:force_divisible_by=2"
 if [ $enc = hw ]; then
     encoder=h264_mediacodec
-    vcodec=(-vf "$scale,format=nv12" -c:v $encoder -b:v $rate)
+    vcodec=(-vf "$scale,format=nv12" -c:v $encoder -b:v $rate -g 30)
 else
     encoder=libx264
-    vcodec=(-vf "$scale,format=yuv420p" -c:v $encoder -preset faster -crf 20)
+    vcodec=(-vf "$scale,format=yuv420p" -c:v $encoder -preset faster -crf 20 -g 30)
 fi
 
 die() { echo "gosane.sh: $*" >&2; exit 1; }
@@ -59,7 +60,7 @@ command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null ||
 ffmpeg -hide_banner -encoders 2>/dev/null | grep -qw "$encoder" ||
     die "this ffmpeg has no $encoder encoder.
   Reinstall Termux's build with: pkg install --reinstall ffmpeg$(
-    [ $enc = hw ] && printf '\n  Or use -sw to encode in software.')"
+    [ $enc = hw ] && printf '\n  Or drop -hw to encode in software.')"
 
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
@@ -129,7 +130,7 @@ for f in "${files[@]}"; do
     start=$(date +%s)
     if ! ffmpeg -nostdin -hide_banner -loglevel error -y -i "$f" \
             -map 0:v:0 -map '0:a?' "${vcodec[@]}" -c:a copy \
-            -map_metadata 0 "${date_fix[@]}" -write_tmcd 0 -movflags +faststart "$tmp"; then
+            -map_metadata 0 -map_chapters -1 "${date_fix[@]}" -write_tmcd 0 -movflags +faststart "$tmp"; then
         log "FAIL $name: ffmpeg error"
         rm -f "$tmp"; tmp=; fail_n=$((fail_n + 1)); continue
     fi
