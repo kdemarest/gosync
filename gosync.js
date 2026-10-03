@@ -170,24 +170,41 @@ let done = 0, failed = 0, tmp = null;
 process.on('exit', () => { if (tmp) try { fs.unlinkSync(tmp); } catch {} });
 const runStart = new Date();
 
+const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// The camera now and then stalls for a minute or so, then recovers.
+// Wait up to `secs` for it to answer again.
+function waitForCamera(secs) {
+    for (const end = Date.now() + secs * 1000; Date.now() < end; sleep(5000))
+        try { api('/gopro/camera/info', 5000); return true; } catch {}
+    return false;
+}
+
+const ATTEMPTS = 3, CAMERA_WAIT_SECS = 120;
+let stopped = false;
+
 for (const [i, f] of todo.entries()) {
     try { api('/gopro/camera/keep_alive', 5000); } catch {}   // stop the camera dozing off
     const dest = `${OUT_DIR}/${f.dest}`;
     tmp = `${OUT_DIR}/.${f.dest}.part`;
     const t0 = Date.now();
-    // --speed-time: give up if the transfer stalls for 30s (camera switched off).
-    const r = spawnSync('curl', ['-sS', '--fail', '-m', '1800', '--speed-limit', '1', '--speed-time', '30',
-        '--interface', iface, '-o', tmp, `${base}/videos/DCIM/${f.dir}/${f.n}`],
-        { stdio: ['ignore', 'inherit', 'inherit'] });
-    if (r.status !== 0 || size(tmp) !== f.s) {
-        log(`FAIL ${f.n}: download ${r.status !== 0 ? `error (curl exit ${r.status})` : `size ${size(tmp)} != ${f.s}`}`);
+    let ok = false;
+    for (let attempt = 1; attempt <= ATTEMPTS && !ok; attempt++) {
+        // --speed-time: give up if the transfer stalls for 30s.
+        const r = spawnSync('curl', ['-sS', '--fail', '-m', '1800', '--speed-limit', '1', '--speed-time', '30',
+            '--interface', iface, '-o', tmp, `${base}/videos/DCIM/${f.dir}/${f.n}`],
+            { stdio: ['ignore', 'inherit', 'inherit'] });
+        ok = r.status === 0 && size(tmp) === f.s;
+        if (ok) break;
+        log(`FAIL ${f.n} (attempt ${attempt}/${ATTEMPTS}): ` +
+            (r.status !== 0 ? `curl exit ${r.status}` : `size ${size(tmp)} != ${f.s}`));
         try { fs.unlinkSync(tmp); } catch {}
+        if (!waitForCamera(CAMERA_WAIT_SECS)) { stopped = true; break; }
+    }
+    if (!ok) {
         tmp = null; failed++;
-        // Camera unplugged or switched off? Then every remaining file would fail too.
-        let gone = false;
-        try { api('/gopro/camera/info', 5000); } catch { gone = true; }
-        if (gone) {
-            log(`camera stopped answering; ${todo.length - i - 1} files not tried. ` +
+        if (stopped) {   // unplugged or switched off: every remaining file would fail too
+            log(`camera stopped answering for ${CAMERA_WAIT_SECS}s; ${todo.length - i - 1} files not tried. ` +
                 `Plug it back in, turn it on, and run gosync again to resume.`);
             break;
         }
