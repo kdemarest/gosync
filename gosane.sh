@@ -74,7 +74,8 @@ is_gopro_name() {  # GX010079.MP4, GH01..., GOPR1234, GP011234, GS..., Quik's GX
 }
 
 tmp=
-trap '[ -n "$tmp" ] && rm -f "$tmp"; exit 130' INT TERM
+interrupted() { [ -n "$tmp" ] && rm -f "$tmp"; echo "gosane.sh: interrupted" >&2; exit 130; }
+trap interrupted INT TERM
 
 exec 9>"$HOME/.gosane.lock"
 flock -n 9 || { echo "gosane.sh is already running" >&2; exit 1; }
@@ -92,7 +93,8 @@ for src in "${sources[@]}"; do
     fi
 done
 
-now=$(date +%s) done_n=0 fail_n=0
+# Pick out the ones to convert.
+now=$(date +%s) todo=() durs=()
 for f in "${files[@]}"; do
     name=$(basename "$f")
     stem=${name%.*}
@@ -115,6 +117,24 @@ for f in "${files[@]}"; do
         echo "would convert $f -> $out"
         continue
     fi
+    todo+=("$f") durs+=("$(probe "$f" format=duration)")
+done
+
+# Time left, from the encoding speed so far (seconds of video per second).
+left_dur=$(printf '%s\n' "${durs[@]}" | awk '{ t += $1 } END { print t + 0 }')
+enc_dur=0 enc_secs=0
+eta() {
+    awk -v left="$left_dur" -v d="$enc_dur" -v s="$enc_secs" 'BEGIN {
+        if (d > 0 && left > 0) { m = left * s / d / 60; printf ", about %d min left", m == int(m) ? m : int(m) + 1 } }'
+}
+
+done_n=0 fail_n=0
+for i in "${!todo[@]}"; do
+    f=${todo[i]} dur=${durs[i]}
+    name=$(basename "$f")
+    stem=${name%.*}
+    out=$OUT_DIR/${stem}_$res.mp4
+    of="$((i + 1)) of ${#todo[@]}"
 
     # A GoPro with a reset clock stamps clips 2016; use the file time instead.
     date_fix=()
@@ -125,12 +145,17 @@ for f in "${files[@]}"; do
         log "DATE $name: bad creation time, using file time $ctime"
     fi
 
-    log "CONVERT $name -> $(basename "$out") ($enc)"
+    log "CONVERT $of: $name -> $(basename "$out") ($enc)$(eta)"
+    left_dur=$(awk -v a="$left_dur" -v b="$dur" 'BEGIN { print a - b }')
     tmp=$OUT_DIR/.${stem}_$res.tmp.mp4
     start=$(date +%s)
-    if ! ffmpeg -nostdin -hide_banner -loglevel error -y -i "$f" \
+    ffmpeg -nostdin -hide_banner -loglevel error -y -i "$f" \
             -map 0:v:0 -map '0:a?' "${vcodec[@]}" -c:a copy \
-            -map_metadata 0 -map_chapters -1 "${date_fix[@]}" -write_tmcd 0 -movflags +faststart "$tmp"; then
+            -map_metadata 0 -map_chapters -1 "${date_fix[@]}" -write_tmcd 0 -movflags +faststart "$tmp"
+    rc=$?
+    # ffmpeg catches Ctrl-C itself and exits 255, so bash never sees the signal.
+    (( rc == 255 || rc > 128 )) && interrupted
+    if (( rc != 0 )); then
         log "FAIL $name: ffmpeg error"
         rm -f "$tmp"; tmp=; fail_n=$((fail_n + 1)); continue
     fi
@@ -154,7 +179,9 @@ for f in "${files[@]}"; do
             mv "$f" "$ARCHIVE/"
         fi
     fi
-    log "DONE $name in $(( $(date +%s) - start ))s, $(du -h "$out" | cut -f1)"
+    secs=$(( $(date +%s) - start ))
+    enc_secs=$((enc_secs + secs)) enc_dur=$(awk -v a="$enc_dur" -v b="$dur" 'BEGIN { print a + b }')
+    log "DONE $of: $name in ${secs}s, $(du -h "$out" | cut -f1)$(eta)"
     done_n=$((done_n + 1))
 done
 

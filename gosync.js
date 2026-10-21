@@ -78,9 +78,22 @@ if (!iface) die(`no GoPro found on USB.
   Plug the camera into the phone and turn it on. If it still isn't found, set
   the camera's USB mode to GoPro Connect (Preferences > Connections > USB Connection).`);
 
+// Everything here runs synchronously, so Node never gets a chance to run a
+// SIGINT handler. Ctrl-C reaches the child process instead; check each
+// child's result and stop if it was interrupted.
+function checkInterrupt(r) {
+    if (r.signal === 'SIGINT' || r.signal === 'SIGTERM' || r.status === 130) {
+        console.error('gosync: interrupted');
+        process.exit(130);
+    }
+    return r;
+}
+
 function api(urlPath, timeout = 15000) {
-    return execFileSync('curl', ['-sS', '--fail', '-m', String(timeout / 1000),
-        '--interface', iface, base + urlPath], { encoding: 'utf8', maxBuffer: 64e6 });
+    try {
+        return execFileSync('curl', ['-sS', '--fail', '-m', String(timeout / 1000),
+            '--interface', iface, base + urlPath], { encoding: 'utf8', maxBuffer: 64e6 });
+    } catch (e) { checkInterrupt(e); throw e; }
 }
 
 let info;
@@ -170,7 +183,8 @@ let done = 0, failed = 0, tmp = null;
 process.on('exit', () => { if (tmp) try { fs.unlinkSync(tmp); } catch {} });
 const runStart = new Date();
 
-const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// A child sleep, not Atomics.wait, so Ctrl-C can interrupt it.
+const sleep = ms => checkInterrupt(spawnSync('sleep', [String(ms / 1000)], { stdio: 'inherit' }));
 
 // The camera now and then stalls for a minute or so, then recovers.
 // Wait up to `secs` for it to answer again.
@@ -183,17 +197,28 @@ function waitForCamera(secs) {
 const ATTEMPTS = 3, CAMERA_WAIT_SECS = 120;
 let stopped = false;
 
+// Time left, from the transfer rate so far (time spent waiting on a stalled
+// camera doesn't count).
+let bytesCopied = 0, copySecs = 0;
+function eta(bytesLeft) {
+    if (!bytesCopied || !bytesLeft) return '';
+    const mins = Math.ceil(bytesLeft / (bytesCopied / copySecs) / 60);
+    return `, about ${mins} min left`;
+}
+
 for (const [i, f] of todo.entries()) {
     try { api('/gopro/camera/keep_alive', 5000); } catch {}   // stop the camera dozing off
     const dest = `${OUT_DIR}/${f.dest}`;
     tmp = `${OUT_DIR}/.${f.dest}.part`;
-    const t0 = Date.now();
-    let ok = false;
+    const bytesLeft = todo.slice(i).reduce((n, f) => n + f.s, 0);
+    console.log(`copying ${i + 1} of ${todo.length}: ${f.n}, ${mb(f.s)}${eta(bytesLeft)}`);
+    let ok = false, t0;
     for (let attempt = 1; attempt <= ATTEMPTS && !ok; attempt++) {
         // --speed-time: give up if the transfer stalls for 30s.
-        const r = spawnSync('curl', ['-sS', '--fail', '-m', '1800', '--speed-limit', '1', '--speed-time', '30',
+        t0 = Date.now();
+        const r = checkInterrupt(spawnSync('curl', ['-sS', '--fail', '-m', '1800', '--speed-limit', '1', '--speed-time', '30',
             '--interface', iface, '-o', tmp, `${base}/videos/DCIM/${f.dir}/${f.n}`],
-            { stdio: ['ignore', 'inherit', 'inherit'] });
+            { stdio: ['ignore', 'inherit', 'inherit'] }));
         ok = r.status === 0 && size(tmp) === f.s;
         if (ok) break;
         log(`FAIL ${f.n} (attempt ${attempt}/${ATTEMPTS}): ` +
@@ -224,8 +249,9 @@ for (const [i, f] of todo.entries()) {
     record(f);
     done++;
     const secs = (Date.now() - t0) / 1000;
-    log(`[${i + 1}/${todo.length}] ${f.n}${f.dest !== f.n ? ` -> ${f.dest}` : ''}, ` +
-        `${mb(f.s)} in ${secs.toFixed(1)}s${note}`);
+    bytesCopied += f.s; copySecs += secs;
+    log(`[${i + 1} of ${todo.length}] ${f.n}${f.dest !== f.n ? ` -> ${f.dest}` : ''}, ` +
+        `${mb(f.s)} in ${secs.toFixed(1)}s${note}${eta(bytesLeft - f.s)}`);
 }
 
 log(`copied ${done}, failed ${failed}`);
@@ -234,5 +260,5 @@ log(`copied ${done}, failed ${failed}`);
 
 // Copied files carry their capture time, so gosane's "still syncing" check
 // would wrongly hold back the ones just dated to now; turn it off.
-const r = spawnSync(GOSANE, [], { stdio: 'inherit', env: { ...process.env, GOSANE_SETTLE_SECS: '0' } });
+const r = checkInterrupt(spawnSync(GOSANE, [], { stdio: 'inherit', env: { ...process.env, GOSANE_SETTLE_SECS: '0' } }));
 process.exitCode = failed || r.status ? 1 : 0;
